@@ -14,7 +14,7 @@
 
 <img width="400" alt="image" src="https://user-images.githubusercontent.com/91013628/230378884-5a0f15ee-1aa2-4998-9df7-ade9f32a3d0f.png">
 
-MoonModules/WLED is a fork of [Aircoookie/WLED](https://github.com/Aircoookie/WLED) which contains latest merge of v0.14 of WLED with [additional features](https://mm.kno.wled.ge/moonmodules/what-is-moonmodules/).
+MoonModules/WLED is a fork of [wled/WLED](https://github.com/wled/WLED) which contains latest merge of v0.14 of WLED with [additional features](https://mm.kno.wled.ge/moonmodules/what-is-moonmodules/).
 
 This fork is created by members of the [Atuline/WLED](https://github.com/atuline/WLED) team to make development against v0.14 possible while still preserving [Atuline/WLED v0.13.x](https://github.com/atuline/WLED/tree/dev) as a stable and supported version. The Atuline/WLED fork is also called WLED SR (Sound Reactive).
 
@@ -33,4 +33,4 @@ We welcome contributions to this project! See [contributing](https://github.com/
 
 ## *Disclaimer:*   
 
-Using this software is the users responsibility as it is not bug free. Therefore contributors of this repo are not reliable for anything including but not limited to spontaneous combustion of the entire led strip, the house and the inevitable heat death of the universe
+Using this software is the users responsibility as it is not bug free. Therefore contributors of this repo are not liable for anything including but not limited to spontaneous combustion of the entire led strip, the house and the inevitable heat death of the universe

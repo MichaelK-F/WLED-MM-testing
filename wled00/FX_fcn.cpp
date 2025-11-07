@@ -94,7 +94,7 @@ Segment::Segment(const Segment &orig) {
   _t = nullptr;
   if (ledsrgb && !Segment::_globalLeds) {ledsrgb = nullptr; ledsrgbSize = 0;}  // WLEDMM
   if (orig.name) { name = new(std::nothrow) char[strlen(orig.name)+1]; if (name) strcpy(name, orig.name); }
-  if (orig.data) { if (allocateData(orig._dataLen)) memcpy(data, orig.data, orig._dataLen); }
+  if (orig.data) { if (allocateData(orig._dataLen, true)) memcpy(data, orig.data, orig._dataLen); }
   //if (orig._t)   { _t = new(std::nothrow) Transition(orig._t->_dur, orig._t->_briT, orig._t->_cctT, orig._t->_colorT); }
   //else markForReset(); // WLEDMM
   // if (orig.ledsrgb && !Segment::_globalLeds) { allocLeds(); if (ledsrgb) memcpy(ledsrgb, orig.ledsrgb, sizeof(CRGB)*length()); } // WLEDMM
@@ -179,7 +179,7 @@ Segment& Segment::operator= (const Segment &orig) {
     if (!Segment::_globalLeds) {ledsrgb = nullptr; ledsrgbSize = 0;};             // WLEDMM copy has no buffers (yet)
     // copy source data
     if (orig.name) { name = new(std::nothrow) char[strlen(orig.name)+1]; if (name) strcpy(name, orig.name); }
-    if (orig.data) { if (allocateData(orig._dataLen)) memcpy(data, orig.data, orig._dataLen); }
+    if (orig.data) { if (allocateData(orig._dataLen, true)) memcpy(data, orig.data, orig._dataLen); }
     //if (orig._t)   { _t = new(std::nothrow) Transition(orig._t->_dur, orig._t->_briT, orig._t->_cctT, orig._t->_colorT); }
     //else markForReset(); // WLEDMM
     //if (orig.ledsrgb && !Segment::_globalLeds) { allocLeds(); if (ledsrgb) memcpy(ledsrgb, orig.ledsrgb, sizeof(CRGB)*length()); } // WLEDMM don't copy old buffer
@@ -218,7 +218,7 @@ Segment& Segment::operator= (Segment &&orig) noexcept {
   return *this;
 }
 
-bool Segment::allocateData(size_t len) {
+bool Segment::allocateData(size_t len, bool allowOverdraft) {  // WLEDMM allowOverdraft for temporary overdraft by segment copy constructor
   // WLEDMM
   if (data && _dataLen >= len) {                          // already allocated enough (reduce fragmentation)
     if ((call == 0) && (len > 0)) memset(data, 0, len);   // erase buffer if called during effect initialisation
@@ -228,9 +228,11 @@ bool Segment::allocateData(size_t len) {
   deallocateData();
   if (len == 0) return false; // nothing to do
   if (Segment::getUsedSegmentData() + len > MAX_SEGMENT_DATA) {
-    //USER_PRINTF("Segment::allocateData: Segment data quota exceeded! used:%u request:%u max:%d\n", Segment::getUsedSegmentData(), len, MAX_SEGMENT_DATA);
-    if (len > 0) errorFlag = ERR_LOW_SEG_MEM;  // WLEDMM raise errorflag
-    return false; //not enough memory
+    if (!allowOverdraft || (Segment::getUsedSegmentData() + len > MAX_SEGMENT_OVERDATA)) { // WLEDMM 50% overdraft allowed temporarily
+      //USER_PRINTF("Segment::allocateData: Segment data quota exceeded! used:%u request:%u max:%d\n", Segment::getUsedSegmentData(), len, MAX_SEGMENT_DATA);
+      if (len > 0) errorFlag = ERR_LOW_SEG_MEM;  // WLEDMM raise errorflag
+      return false; //not enough memory
+    }
   }
   // do not use SPI RAM on ESP32 since it is slow
   //#if defined(ARDUINO_ARCH_ESP32) && defined(BOARD_HAS_PSRAM) && defined(WLED_USE_PSRAM)
@@ -241,23 +243,33 @@ bool Segment::allocateData(size_t len) {
     data = (byte*) malloc(len);
   if (!data) {
       _dataLen = 0; // WLEDMM reset dataLen
+      if ((errorFlag != ERR_LOW_MEM) && (errorFlag != ERR_LOW_SEG_MEM)) { // spam filter
+        USER_PRINT(F("Segment::allocateData: FAILED to allocate ")); 
+        USER_PRINT(len); USER_PRINTLN(F(" bytes."));
+      }
       errorFlag = ERR_LOW_MEM; // WLEDMM raise errorflag
-      USER_PRINT(F("Segment::allocateData: FAILED to allocate ")); 
-      USER_PRINT(len); USER_PRINTLN(F(" bytes."));
       return false;
   } //allocation failed
   Segment::addUsedSegmentData(len);
+  DEBUG_PRINTF("Segment::allocateData: %u bytes allocated (%u used)\n", len, Segment::getUsedSegmentData());
   _dataLen = len;
   memset(data, 0, len);
-  if (errorFlag == ERR_LOW_SEG_MEM) errorFlag = ERR_NONE; // WLEDMM reset errorflag on success
+  if ((errorFlag == ERR_LOW_SEG_MEM) || (errorFlag == ERR_LOW_MEM) || (errorFlag == ERR_NORAM_PX)) errorFlag = ERR_NONE; // WLEDMM reset errorflag on success
   return true;
 }
 
 void Segment::deallocateData() {
-  if (!data) {_dataLen = 0; return;}  // WLEDMM reset dataLen
+  if (!data) {
+    if (_dataLen>0) {
+      Segment::addUsedSegmentData(-_dataLen); // WLEDMM fix housekeeping
+      DEBUG_PRINTF("Segment::deallocateData unregistering %u bytes as unused.", _dataLen);
+    }
+    _dataLen = 0;
+    return;
+  }  // WLEDMM reset dataLen
   free(data);
   data = nullptr;
-  //USER_PRINTF("Segment::deallocateData: free'd   %d bytes.\n", _dataLen);
+  DEBUG_PRINTF("Segment::deallocateData: free'd   %d bytes.\n", _dataLen);
   Segment::addUsedSegmentData(-_dataLen);
   _dataLen = 0;
 }
@@ -938,15 +950,14 @@ static void xyFromBlock(uint16_t &x,uint16_t &y, uint16_t i, uint16_t vW, uint16
 
 }
 
-void IRAM_ATTR_YN __attribute__((hot)) Segment::setPixelColor(int i, uint32_t col) //WLEDMM: IRAM_ATTR conditionally
+void IRAM_ATTR_YN WLED_O2_ATTR __attribute__((hot)) Segment::setPixelColor(int i, uint32_t col) //WLEDMM: IRAM_ATTR conditionally
 {
   if (!isActive()) return; // not active
 #ifndef WLED_DISABLE_2D
   int vStrip = i>>16; // hack to allow running on virtual strips (2D segment columns/rows)
 #endif
   i &= 0xFFFF;
-
-  if (i >= virtualLength() || i<0) return;  // if pixel would fall out of segment just exit
+  if (unsigned(i) >= virtualLength()) return;  // if pixel would fall out of segment just exit //WLEDMM unsigned(i)>SEGLEN also catches "i<0"
 
 #ifndef WLED_DISABLE_2D
   if (is2D()) {
@@ -1212,7 +1223,7 @@ void Segment::setPixelColor(float i, uint32_t col, bool aa)
   }
 }
 
-uint32_t __attribute__((hot)) Segment::getPixelColor(int i) const
+uint32_t WLED_O2_ATTR __attribute__((hot)) Segment::getPixelColor(int i) const
 {
   if (!isActive()) return 0; // not active
 #ifndef WLED_DISABLE_2D
@@ -1844,7 +1855,7 @@ void WS2812FX::finalizeInit(void)
     //#endif
       if (arrSize > 0) Segment::_globalLeds = (CRGB*) malloc(arrSize); // WLEDMM avoid malloc(0)
     if ((Segment::_globalLeds != nullptr) && (arrSize > 0)) memset(Segment::_globalLeds, 0, arrSize); // WLEDMM avoid dereferencing nullptr
-    if ((Segment::_globalLeds == nullptr) && (arrSize > 0)) errorFlag = ERR_LOW_MEM; // WLEDMM raise errorflag
+    if ((Segment::_globalLeds == nullptr) && (arrSize > 0)) errorFlag = ERR_NORAM_PX; // WLEDMM raise errorflag
   }
 
   //segments are created in makeAutoSegments();
@@ -1914,7 +1925,7 @@ void WS2812FX::service() {
     if(nowUp >= seg.next_time || _triggered || (doShow && seg.mode == FX_MODE_STATIC))  // WLEDMM ">=" instead of ">"
     {
       if (seg.grouping == 0) seg.grouping = 1; //sanity check
-      if (!seg.freeze) doShow = true;
+      if ((!seg.freeze) || _triggered) doShow = true;   // WLEDMM "triggered" overrules "freeze"
       uint16_t frameDelay = FRAMETIME;    // WLEDMM avoid name clash with "delay" function
 
       if (!seg.freeze) { //only run effect function if not frozen
@@ -1950,6 +1961,8 @@ void WS2812FX::service() {
     }
     _segment_index++;
   }
+  if (_triggered) doShow = true;      // WLEDMM "triggered" always means "show"
+
   _virtualSegmentLength = 0;
   busses.setSegmentCCT(-1);
   if(doShow) {
@@ -1969,26 +1982,11 @@ void WS2812FX::service() {
   _isServicing = false;
 }
 
-void IRAM_ATTR WS2812FX::setPixelColor(int i, uint32_t col)
-{
-  if (i < customMappingSize) i = customMappingTable[i];
-  if (i >= _length) return;
-  busses.setPixelColor(i, col);
-}
 
-uint32_t WS2812FX::getPixelColor(uint_fast16_t i) const // WLEDMM fast int types
-{
-  if (i < customMappingSize) i = customMappingTable[i];
-  if (i >= _length) return 0;
-  return busses.getPixelColor(i);
-}
+// WLEDMM: WS2812FX::setPixelColor() moved FX.h for speed (inlining)
+// WLEDMM: WS2812FX::getPixelColor() moved FX.h for speed (inlining)
+// WLEDMM: WS2812FX::getPixelColorRestored() moved FX.h for speed (inlining)
 
-uint32_t WS2812FX::getPixelColorRestored(uint_fast16_t i)  const  // WLEDMM gets the original color from the driver (without downscaling by _bri)
-{
-  if (i < customMappingSize) i = customMappingTable[i];
-  if (i >= _length) return 0;
-  return busses.getPixelColorRestored(i);
-}
 
 //DISCLAIMER
 //The following function attemps to calculate the current LED power usage,
